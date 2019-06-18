@@ -27,26 +27,22 @@ const IPAddress WiFiPrimaryDNS(192, 168, 0, 1); //must have
 const IPAddress WiFiSecondaryDNS(8, 8, 4, 4);   //optional
 
 // Pins
-const byte OLEDResetPin = 16;         // reset pin for OLED display
 const byte WaterLevelTriggerPin = 13; // take high then read water level pin then take low to conserve battery
 const byte WaterLevelPin = 21;        // on/off pin for water level
+const byte DCVinPin = 36;             // pin for dc input
+const byte OLEDResetPin = 16;         // reset pin for OLED display
 const byte OLEDSDA = 4;
 const byte OLEDSCL = 15;
 
 // analogue input
-const byte DCinPin = 36;                                        // pin for dc input
-const int NoVinCycles = 10;                                     // no of reads to average dc reading
-const int DCinLoopWait = 10;                                    // delay between reads when averaging
-const float DividerRatio = 100000.0f / (230000.0f + 100000.0f); // resistors in voltage divider (230k top(R1), 100k bottom(R2))
-// Vin calc: -0.000000000000016 * pow(Vin,4) + 0.000000000118171 * pow(Vin,3)- 0.000000301211691 * pow(Vin,2)+ 0.001109019271794 * Vin + 0.034143524634089;
-// from: https://github.com/G6EJD/ESP32-ADC-Accuracy-Improvement-function/blob/master/ESP32_ADC_Read_Voltage_Accurate.ino
-// takes into account 3.3v max input and 4095 max width, no idea how it works
-
+const int DCVinCycles = 10;                                      // no of reads to average dc reading
+const int DCLoopWait = 10;                                       // delay between reads when averaging
+const float DCDivideRatio = 100000.0f / (230000.0f + 100000.0f); // resistors in voltage divider (230k top(R1), 100k bottom(R2))
 // Delays
-const int WaitForKeyDelay = 1000;                        // 2 second delay when starting up to see if the key has been pressed, if so then wakeup
-const int WiFiWait = 2000;                               // 2 second delay for wifi to settle, probably not needed
+const int WaitForKeyDelay = 1000;                        // 1 second delay when starting up to see if the key has been pressed, if so then wakeup
+const int WiFiWait = 1000;                               // 1 second delay for wifi to settle, probably not needed
 const unsigned long DeepSleepTime = 10 * 60 * 1000000UL; // sleep for 10 minutes (time in microseconds)
-const int SendPacketDelay = 4000;                        // delay to allow packet to send
+const int SendPacketDelay = 2000;                        // delay to allow packet to send
 const int KeyPressedDelay = 500;                         // delay to display key pressed message on oled
 const int SendPacketLoopDelay = 5000;                    // delay between messages during wakeup loop
 
@@ -54,7 +50,7 @@ const byte LEDOn = HIGH;
 const byte LEDOff = LOW;
 
 // lora packet preamble, checked by receiver to see if it is a valid packet
-const String PacketPreAmble = "A1A";
+const String LoraPacketPreAmble = "A1A";
 
 // setup the display
 SSD1306 display(0x3c, OLEDSDA, OLEDSCL);
@@ -86,24 +82,17 @@ String GetVoltageLevel()
 {
   // voltage reading
   float Vin = 0.0;
-  String Level = "";                    // reset reading to 0 before taking the next reading
-  for (int i = 0; i < NoVinCycles; i++) // taking X samples and averaging them
+  for (int i = 0; i < DCVinCycles; i++) // taking X samples and averaging them
   {
-    Vin += analogRead(DCinPin);
-    vTaskDelay(pdMS_TO_TICKS(DCinLoopWait)); // pause between each reading to let it settle
+    Vin += analogRead(DCVinPin);
+    vTaskDelay(pdMS_TO_TICKS(DCLoopWait)); // pause between each reading to let it settle
   }
-  Vin = (Vin / NoVinCycles); // Get average reading from the divider and manipulate to make more accurate
+  Vin = (Vin / DCVinCycles); // Get average reading from the divider and manipulate to make more accurate
   // from: https://github.com/G6EJD/ESP32-ADC-Accuracy-Improvement-function/blob/master/ESP32_ADC_Read_Voltage_Accurate.ino
-  // takes into account 3.3v max input and 4096 max width, no idea how it works but it improved the accuracy of my readings which were reading low
+  // takes into account 3.3v max input and 4096 max width, no idea how it works but it improved the accuracy of my readings
   Vin = -0.000000000000016 * pow(Vin, 4) + 0.000000000118171 * pow(Vin, 3) - 0.000000301211691 * pow(Vin, 2) + 0.001109019271794 * Vin + 0.034143524634089;
-
-  Serial.print("Voltage from divider: ");
-  Serial.print(Vin);
-  Vin = (Vin / DividerRatio); // Get voltage at the top of the divider
-  Serial.print(",  Voltage to divider: ");
-  Serial.println(Vin);
-  Level = String(int(Vin * 100)); // move 2 decimal places above the decimal point, make an integer then a string.  Divide by 100 at the receiving end
-  return Level;
+  Vin = (Vin / DCDivideRatio);   // Get voltage at the top of the divider
+  return String(int(Vin * 100)); // move 2 decimal places above the decimal point, make an integer then a string.  Divide by 100 at the receiving end
 }
 void SetUpOLED()
 {
@@ -120,7 +109,7 @@ void SetUpOLED()
 void SendPacket()
 {
   LoRa.beginPacket();
-  LoRa.print(PacketPreAmble);
+  LoRa.print(LoraPacketPreAmble);
   LoRa.print(GetWaterLevel());
   LoRa.print(GetVoltageLevel());
   LoRa.endPacket();
@@ -137,6 +126,7 @@ void setup()
 {
   // don't need bluetooth
   btStop();
+
   // setup pins
   pinMode(OLEDResetPin, OUTPUT);
   pinMode(BUILTIN_LED, OUTPUT);
@@ -146,9 +136,8 @@ void setup()
 
   // setup and start lora
   SPI.begin(SCK, MISO, MOSI, SS);
-  vTaskDelay(pdMS_TO_TICKS(50));
+  //vTaskDelay(pdMS_TO_TICKS(50));
   LoRa.setPins(SS, RST, DIO0);
-
   if (!LoRa.begin(LoraBand)) // must have lora to work, will only fail to begin if the lora module is the wrong type
   {
     SetUpOLED();
@@ -161,14 +150,14 @@ void setup()
     }
   }
   LoRa.setSyncWord(0xA1); // ranges from 0-0xFF, default 0x34, see API docs - doesn't seem to work
+
   // Setup analogue DC input
   analogReadResolution(12);
   analogSetWidth(12);
   analogSetCycles(8);
   analogSetSamples(1);
   analogSetClockDiv(1);
-  analogSetPinAttenuation(DCinPin, ADC_11db); //VP pin
-  vTaskDelay(pdMS_TO_TICKS(50));
+  analogSetPinAttenuation(DCVinPin, ADC_11db); //VP pin
 
   // wait for key pressed to see if we need to wake up for OTA
   unsigned long Timing = millis();
@@ -231,15 +220,15 @@ void setup()
     }
   }
   // not waking up so just send and sleep
-  SendPacket();
+  WiFi.mode(WIFI_OFF);                        // don't need wifi, shut it down to save battery
+  SendPacket();                               // create and send a lora packet
   vTaskDelay(pdMS_TO_TICKS(SendPacketDelay)); // delay to make sure packet has gone b4 going to sleep
 
-  WiFi.mode(WIFI_OFF);
   esp_sleep_enable_timer_wakeup(DeepSleepTime);
   esp_deep_sleep_start();
 }
 
 void loop() // if sleep enabled then this will never execute, if wakeup is called then it will stay in WakeUpLoop and this will never be executed
 {
-  vTaskDelay(pdMS_TO_TICKS(1));
+  vTaskDelay(pdMS_TO_TICKS(100));
 }
